@@ -1,18 +1,25 @@
 ﻿using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;
+using Microsoft.Diagnostics.Tracing.Parsers;
+using System.Buffers;
+using System.Collections;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO.Pipelines;
+using System.Text;
 
 //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
 
-RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
-RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
+//await RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
+await RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
 
-void RunAndMeasure(Action action, string name)
+
+
+async Task RunAndMeasure(Func<Task> action, string name)
 {
     var sw = Stopwatch.StartNew();
     //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
-    action();
+    await action();
     sw.Stop();
     Console.WriteLine("Running {0} finished in {1}", name, sw.Elapsed);
 }
@@ -23,35 +30,64 @@ void RunAndMeasure(Action action, string name)
 public class OneBrcChallenge
 {
     private const int TakeCount = 50_000_000;
+    private const byte Newline = (byte)'\n';
+    private const byte SemiColon = (byte)';';
 
     [Benchmark]
-    public void PrintStats()
+    public async Task PrintStats()
     {
         var sw = Stopwatch.StartNew();
         var stats = new Dictionary<string, int[]>();
+        //var cstats = new ConcurrentDictionary<string, int[]>();
+        //var stats = new Dictionary<byte[], int[]>(ByteArrayComparer.Default);
 
-        //using (var fs = new FileStream(""))
-        //var pr = PipeReader.Create()
-        foreach (var line in File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt").Take(TakeCount))
+        using var fs = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
+        var pr = PipeReader.Create(fs);
+
+        var processedCount = 0;
+
+        var readResult = await pr.ReadAsync();
+
+        while (!readResult.IsCompleted)
         {
-            var semiColon = line.IndexOf(';');
-            var city = new string(line.AsSpan(0, semiColon));
-            var numSpan = line.AsSpan(semiColon + 1);
-            var num = numSpan[0] == '-' ?
-                int.Parse(numSpan[1..^2]) * -10 - (numSpan[^1] - 48) :
-                int.Parse(numSpan[0..^2]) * 10 + (numSpan[^1] - 48);
+            var reader = new SequenceReader<byte>(readResult.Buffer);
 
-            if (stats.TryGetValue(city, out var values))
+            while (reader.TryReadTo(out ReadOnlySpan<byte> line, Newline))
             {
-                values[0] = Math.Min(values[0], num);
-                values[1] = Math.Max(values[1], num);
-                values[2] = values[2] + 1;
-                values[3] = values[3] + num;
+                var semiColon = line.IndexOf(SemiColon);
+                var city = Encoding.UTF8.GetString(line[..semiColon]);
+
+                var num = line[semiColon + 1] == '-' ?
+                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+
+                if (stats.TryGetValue(city, out var values))
+                //if (stats.TryGetValue(line[..semiColon].ToArray(), out var values))
+                {
+                    values[0] = Math.Min(values[0], num);
+                    values[1] = Math.Max(values[1], num);
+                    values[2] = values[2] + 1;
+                    values[3] = values[3] + num;
+                }
+                else
+                {
+                    stats.Add(city, [num, num, 1, num]);
+                    //stats.Add(line[..semiColon].ToArray(), [num, num, 1, num]);
+                }
+
+                if (processedCount++ >= TakeCount)
+                {
+                    break;
+                }
             }
-            else
+
+            if (processedCount >= TakeCount)
             {
-                stats.Add(city, [num, num, 1, num]);
+                break;
             }
+
+            pr.AdvanceTo(reader.Position, readResult.Buffer.End);
+            readResult = await pr.ReadAsync();
         }
 
         Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
@@ -60,6 +96,7 @@ public class OneBrcChallenge
         var first = true;
 
         foreach (var kvp in stats.OrderBy(kvp => kvp.Key))
+        //foreach (var kvp in stats.OrderBy(kvp => Encoding.UTF8.GetString(kvp.Key)))
         {
             if (!first)
             {
@@ -69,6 +106,7 @@ public class OneBrcChallenge
             first = false;
 
             Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
+            //Console.Write("{0}={1}/{2}/{3}", Encoding.UTF8.GetString(kvp.Key), Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
         }
 
         Console.WriteLine("}");
@@ -76,7 +114,7 @@ public class OneBrcChallenge
     }
 
     [Benchmark]
-    public void PrintStatsBaseline()
+    public async Task PrintStatsBaseline()
     {
         var stats = new Dictionary<string, double[]>();
 
@@ -118,3 +156,6 @@ public class OneBrcChallenge
         Console.WriteLine("}");
     }
 }
+
+public readonly struct Stats(int Min, int Max, int Count, int Sum)
+{}
