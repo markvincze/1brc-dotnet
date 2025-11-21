@@ -4,6 +4,7 @@
 ## Get latest from `dotnet new gitignore`
 
 measurements.txt
+measurements-small.txt
 
 # dotenv files
 .env

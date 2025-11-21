@@ -8,11 +8,21 @@ using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Text;
 
+//using var fsOrig = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
+//using var fsSmall = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Create, FileAccess.ReadWrite);
+//using var sr = new StreamReader(fsOrig);
+//using var sw = new StreamWriter(fsSmall);
+
+//for (int i = 0; i < 50_000_000; i++)
+//{
+//    sw.WriteLine(sr.ReadLine());
+//}
+
+
 //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
 
 //await RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
 await RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
-
 
 
 async Task RunAndMeasure(Func<Task> action, string name)
@@ -29,66 +39,100 @@ async Task RunAndMeasure(Func<Task> action, string name)
 [InvocationCount(1)]
 public class OneBrcChallenge
 {
-    private const int TakeCount = 50_000_000;
+    private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt";
     private const byte Newline = (byte)'\n';
     private const byte SemiColon = (byte)';';
+    private int totalLinesProcessed = 0;
+
+    private FileStream OpenFile() => new FileStream(filePath, FileMode.Open, FileAccess.Read);
+
+    private long FindNextNewlinePos(FileStream fs)
+    {
+        while (fs.ReadByte() != '\n')
+        {
+        }
+
+        return fs.Position - 1;
+    }
+
+    private long[] GetBatchPositions()
+    {
+        using var fs = OpenFile();
+        //var coreCount = Environment.ProcessorCount;
+        var coreCount = 1;
+
+        var batchSize = fs.Length / coreCount;
+
+        var batchPositions = new long[coreCount + 1];
+        batchPositions[0] = 0;
+        batchPositions[coreCount] = fs.Length;
+
+        for (int i = 1; i < coreCount; i++)
+        {
+            fs.Seek(batchSize * i, SeekOrigin.Begin);
+
+            batchPositions[i] = FindNextNewlinePos(fs) + 1;
+        }
+
+        return batchPositions;
+    }
+
+    private void ProcessBatch(long from, long to, ConcurrentDictionary<string, Stats> stats)
+    {
+        using var fs = OpenFile();
+        fs.Seek(from, SeekOrigin.Begin);
+        var bytesRead = from;
+
+        using var sr = new StreamReader(fs);
+
+        //while (fs.Position < to)
+        while (bytesRead < to)
+        {
+            var line = sr.ReadLine();
+            bytesRead += (line.Length + 2);
+            Interlocked.Increment(ref totalLinesProcessed);
+
+            var semiColon = line.IndexOf(';');
+            var city = line[..semiColon];
+
+            var num = line[semiColon + 1] == '-' ?
+                int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+                int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+
+            stats.AddOrUpdate(city,
+                new Stats(num, num, 1, num),
+                (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
+        }
+    }
 
     [Benchmark]
     public async Task PrintStats()
     {
+        //using var f = OpenFile();
+        //var s = FindNextNewlinePos(f);
+        //foreach ( var l in File.ReadLines(filePath).Take(10))
+        //{
+        //    Console.WriteLine(l);
+        //}
+        //return;
         var sw = Stopwatch.StartNew();
-        var stats = new Dictionary<string, int[]>();
-        //var cstats = new ConcurrentDictionary<string, int[]>();
-        //var stats = new Dictionary<byte[], int[]>(ByteArrayComparer.Default);
+        var stats = new ConcurrentDictionary<string, Stats>();
 
-        using var fs = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
-        var pr = PipeReader.Create(fs);
+        var batchPositions = GetBatchPositions();
 
-        var processedCount = 0;
+        Console.WriteLine("Determining batch positions took: {0}", sw.Elapsed);
 
-        var readResult = await pr.ReadAsync();
+        var tasks = new List<Task>();
 
-        while (!readResult.IsCompleted)
+        for (int i = 0; i < batchPositions.Length - 1; i++)
         {
-            var reader = new SequenceReader<byte>(readResult.Buffer);
-
-            while (reader.TryReadTo(out ReadOnlySpan<byte> line, Newline))
-            {
-                var semiColon = line.IndexOf(SemiColon);
-                var city = Encoding.UTF8.GetString(line[..semiColon]);
-
-                var num = line[semiColon + 1] == '-' ?
-                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
-                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
-
-                if (stats.TryGetValue(city, out var values))
-                //if (stats.TryGetValue(line[..semiColon].ToArray(), out var values))
-                {
-                    values[0] = Math.Min(values[0], num);
-                    values[1] = Math.Max(values[1], num);
-                    values[2] = values[2] + 1;
-                    values[3] = values[3] + num;
-                }
-                else
-                {
-                    stats.Add(city, [num, num, 1, num]);
-                    //stats.Add(line[..semiColon].ToArray(), [num, num, 1, num]);
-                }
-
-                if (processedCount++ >= TakeCount)
-                {
-                    break;
-                }
-            }
-
-            if (processedCount >= TakeCount)
-            {
-                break;
-            }
-
-            pr.AdvanceTo(reader.Position, readResult.Buffer.End);
-            readResult = await pr.ReadAsync();
+            long from = batchPositions[i];
+            long to = batchPositions[i + 1];
+            //tasks.Add(Task.Run(() => ProcessBatch(from, to, stats)));
+            ProcessBatch(from, to, stats);
         }
+
+        await Task.WhenAll(tasks);
 
         Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
 
@@ -96,7 +140,6 @@ public class OneBrcChallenge
         var first = true;
 
         foreach (var kvp in stats.OrderBy(kvp => kvp.Key))
-        //foreach (var kvp in stats.OrderBy(kvp => Encoding.UTF8.GetString(kvp.Key)))
         {
             if (!first)
             {
@@ -105,11 +148,13 @@ public class OneBrcChallenge
 
             first = false;
 
-            Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
+            //Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
+            Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value.Min / 10.0, 1), Math.Round((double)kvp.Value.Sum / 10 / kvp.Value.Count, 1), Math.Round(kvp.Value.Max / 10.0, 1));
             //Console.Write("{0}={1}/{2}/{3}", Encoding.UTF8.GetString(kvp.Key), Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
         }
 
         Console.WriteLine("}");
+        Console.WriteLine("Total lines processed: {0}", totalLinesProcessed);
         sw.Stop();
     }
 
@@ -118,8 +163,12 @@ public class OneBrcChallenge
     {
         var stats = new Dictionary<string, double[]>();
 
-        foreach (var l in File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt").Take(TakeCount))
+        //using var fs = OpenFile();
+        //using 
+
+        foreach (var l in File.ReadLines(filePath))
         {
+            Interlocked.Increment(ref totalLinesProcessed);
             var segments = l.Split(';');
             var num = double.Parse(segments[1]);
 
@@ -154,8 +203,9 @@ public class OneBrcChallenge
         }
 
         Console.WriteLine("}");
+        Console.WriteLine("Total lines processed: {0}", totalLinesProcessed);
     }
 }
 
-public readonly struct Stats(int Min, int Max, int Count, int Sum)
-{}
+public readonly record struct Stats(int Min, int Max, int Count, int Sum)
+{ }
