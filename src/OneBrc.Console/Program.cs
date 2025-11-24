@@ -10,6 +10,7 @@ using System.IO.MemoryMappedFiles;
 using System.IO.Pipelines;
 using System.Runtime.InteropServices;
 using System.Text;
+using OneBrc.Console;
 
 //var fileHandle = File.OpenHandle(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
 //var fileLength = RandomAccess.GetLength(fileHandle);
@@ -107,11 +108,9 @@ public class OneBrcChallenge
     }
 
 
-    private void ProcessBatchRandomAccess(long from, long to, ConcurrentDictionary<string, Stats> stats)
+    private void ProcessBatchRandomAccess(long from, long to, Dictionary<string, Stats> stats)
     {
         Console.WriteLine("Starting batch from {0} to {1}", from, to);
-
-        var statsDict = new Dictionary<string, Stats>();
 
         var handle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
         //Span<byte> buffer = stackalloc byte[4096];
@@ -156,13 +155,13 @@ public class OneBrcChallenge
                 //    new Stats(num, num, 1, num),
                 //    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
 
-                if (statsDict.TryGetValue(city, out var s))
+                if (stats.TryGetValue(city, out var s))
                 {
-                    statsDict[city] = new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num);
+                    stats[city] = new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num);
                 }
                 else
                 {
-                    statsDict.Add(city, new Stats(num, num, 1, num));
+                    stats.Add(city, new Stats(num, num, 1, num));
                 }
 
                 remainingBuffer = remainingBuffer[(lineEnd + 1)..];
@@ -184,7 +183,7 @@ public class OneBrcChallenge
         //}
         //return;
         var sw = Stopwatch.StartNew();
-        var stats = new ConcurrentDictionary<string, Stats>();
+        //var stats = new ConcurrentDictionary<string, Stats>();
 
         var batchPositions = GetBatchPositions();
 
@@ -192,18 +191,20 @@ public class OneBrcChallenge
 
         //var tasks = new List<Task>();
         var threads = new Thread[batchPositions.Length - 1];
+        var dicts = Array.Create(batchPositions.Length - 1, _ => new Dictionary<string, Stats>());
 
         for (int i = 0; i < batchPositions.Length - 1; i++)
         {
             long from = batchPositions[i];
             long to = batchPositions[i + 1];
+            var dict = dicts[i];
 
             //ProcessBatchRandomAccess(from, to, stats);
 
             threads[i] = new Thread(() =>
             {
                 //ProcessBatchPipeline(from, to, stats).Wait();
-                ProcessBatchRandomAccess(from, to, stats);
+                ProcessBatchRandomAccess(from, to, dict);
             });
             threads[i].Start();
         }
@@ -214,12 +215,31 @@ public class OneBrcChallenge
             if (t != null) t.Join();
         }
 
+        var aggregateStats = dicts
+            .SelectMany(d => d.Keys)
+            .Distinct()
+            .ToDictionary(
+                city => city,
+                city => dicts.Aggregate(
+                    new Stats(int.MaxValue, int.MinValue, 0, 0),
+                    (acc, dict) =>
+                    {
+                        if (dict.TryGetValue(city, out var s))
+                        {
+                            return new Stats(Math.Min(s.Min, acc.Min), Math.Max(s.Max, acc.Max), s.Count + acc.Count, s.Sum + acc.Sum);
+                        }
+                        else
+                        {
+                            return acc;
+                        }
+                    }));
+
         Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
 
         Console.Write("{");
         var first = true;
 
-        foreach (var kvp in stats.OrderBy(kvp => kvp.Key))
+        foreach (var kvp in aggregateStats.OrderBy(kvp => kvp.Key))
         {
             if (!first)
             {
