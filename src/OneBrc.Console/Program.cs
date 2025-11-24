@@ -5,8 +5,15 @@ using System.Buffers;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Drawing;
+using System.IO.MemoryMappedFiles;
 using System.IO.Pipelines;
+using System.Runtime.InteropServices;
 using System.Text;
+
+//var fileHandle = File.OpenHandle(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
+//var fileLength = RandomAccess.GetLength(fileHandle);
+//var minCount = (int)Math.Max(fileLength / (int.MaxValue - Environment.SystemPageSize), 1);
 
 //using var fsOrig = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
 //using var fsSmall = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Create, FileAccess.ReadWrite);
@@ -15,10 +22,11 @@ using System.Text;
 
 //for (int i = 0; i < 50_000_000; i++)
 //{
-//    sw.WriteLine(sr.ReadLine());
+//    sw.Write(sr.ReadLine());
+//    sw.Write("\n");
 //}
 
-
+//return;
 //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
 
 //await RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
@@ -58,8 +66,8 @@ public class OneBrcChallenge
     private long[] GetBatchPositions()
     {
         using var fs = OpenFile();
-        //var coreCount = Environment.ProcessorCount;
-        var coreCount = 1;
+        var coreCount = Environment.ProcessorCount;
+        //var coreCount = 1;
 
         var batchSize = fs.Length / coreCount;
 
@@ -77,33 +85,112 @@ public class OneBrcChallenge
         return batchPositions;
     }
 
-    private void ProcessBatch(long from, long to, ConcurrentDictionary<string, Stats> stats)
+    private async Task ProcessBatchPipeline(long from, long to, ConcurrentDictionary<string, Stats> stats)
     {
+        Console.WriteLine("Starting batch from {0} to {1}", from, to);
+
         using var fs = OpenFile();
         fs.Seek(from, SeekOrigin.Begin);
+
+        var pr = PipeReader.Create(fs);
         var bytesRead = from;
 
-        using var sr = new StreamReader(fs);
+        var readResult = await pr.ReadAsync();
+
+        while (!readResult.IsCompleted)
+        {
+            var reader = new SequenceReader<byte>(readResult.Buffer);
+
+            while (bytesRead < to && reader.TryReadTo(out ReadOnlySpan<byte> line, Newline))
+            {
+                bytesRead += (line.Length + 1);
+                Interlocked.Increment(ref totalLinesProcessed);
+
+                var semiColon = line.IndexOf(SemiColon);
+                var city = Encoding.UTF8.GetString(line[..semiColon]);
+
+                var num = line[semiColon + 1] == '-' ?
+                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+
+                stats.AddOrUpdate(city,
+                    new Stats(num, num, 1, num),
+                    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
+            }
+
+            pr.AdvanceTo(reader.Position, readResult.Buffer.End);
+            readResult = await pr.ReadAsync();
+        }
 
         //while (fs.Position < to)
-        while (bytesRead < to)
-        {
-            var line = sr.ReadLine();
-            bytesRead += (line.Length + 2);
-            Interlocked.Increment(ref totalLinesProcessed);
+        //while (bytesRead < to)
+        //{
+        //    var line = sr.ReadLine();
+        //    bytesRead += (line.Length + 2);
+        //    Interlocked.Increment(ref totalLinesProcessed);
 
-            var semiColon = line.IndexOf(';');
-            var city = line[..semiColon];
+        //    var semiColon = line.IndexOf(';');
+        //    var city = line[..semiColon];
 
-            var num = line[semiColon + 1] == '-' ?
-                int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
-                int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+        //    var num = line[semiColon + 1] == '-' ?
+        //        int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+        //        int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
 
-            stats.AddOrUpdate(city,
-                new Stats(num, num, 1, num),
-                (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
-        }
+        //    stats.AddOrUpdate(city,
+        //        new Stats(num, num, 1, num),
+        //        (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
+        //}
+        Console.WriteLine("Finishing batch from {0} to {1}", from, to);
     }
+
+    private async Task ProcessBatchRandomAccess(long from, long to, ConcurrentDictionary<string, Stats> stats)
+    {
+        Console.WriteLine("Starting batch from {0} to {1}", from, to);
+
+        var handle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
+        Span<byte> buffer = new byte[4096];
+
+        while(from < to)
+        {
+            var bytesRead = RandomAccess.Read(handle, buffer, from);
+            var remainingBuffer = buffer;
+
+            while (true)
+            {
+                var lineEnd = remainingBuffer.IndexOf(Newline);
+
+                if (lineEnd == -1)
+                {
+                    break;
+                }
+
+                Interlocked.Increment(ref totalLinesProcessed);
+
+                var line = remainingBuffer[..lineEnd];
+
+                var semiColon = line.IndexOf(SemiColon);
+                var city = Encoding.UTF8.GetString(line[..semiColon]);
+
+                var num = line[semiColon + 1] == '-' ?
+                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+
+                stats.AddOrUpdate(city,
+                    new Stats(num, num, 1, num),
+                    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
+
+                remainingBuffer = remainingBuffer[(lineEnd + 1)..];
+                from += lineEnd + 1;
+            }
+        }
+
+        Console.WriteLine("Finishing batch from {0} to {1}", from, to);
+    }
+
+    //public async Task PrintStatsRandom()
+    //{
+
+    //}
 
     [Benchmark]
     public async Task PrintStats()
@@ -122,17 +209,30 @@ public class OneBrcChallenge
 
         Console.WriteLine("Determining batch positions took: {0}", sw.Elapsed);
 
-        var tasks = new List<Task>();
+        //var tasks = new List<Task>();
+        var threads = new Thread[batchPositions.Length - 1];
 
         for (int i = 0; i < batchPositions.Length - 1; i++)
         {
             long from = batchPositions[i];
             long to = batchPositions[i + 1];
+            //ProcessBatchRandomAccess(from, to, stats).Wait();
+
+            threads[i] = new Thread(() =>
+            {
+                //ProcessBatchPipeline(from, to, stats).Wait();
+                ProcessBatchRandomAccess(from, to, stats).Wait();
+            });
+            threads[i].Start();
             //tasks.Add(Task.Run(() => ProcessBatch(from, to, stats)));
-            ProcessBatch(from, to, stats);
+            //await ProcessBatch(from, to, stats);
         }
 
-        await Task.WhenAll(tasks);
+        //await Task.WhenAll(tasks);
+        foreach (var t in threads)
+        {
+            threads[0].Join();
+        }
 
         Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
 
@@ -157,6 +257,30 @@ public class OneBrcChallenge
         Console.WriteLine("Total lines processed: {0}", totalLinesProcessed);
         sw.Stop();
     }
+
+    //public async Task PrintStatsMM()
+    //{
+    //    using (var mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, "measurements"))
+    //    {
+    //        // Create a random access view, from the 256th megabyte (the offset)
+    //        // to the 768th megabyte (the offset plus length).
+    //        //using (var accessor = mmf.CreateViewAccessor(offset, length))
+    //        using (var accessor = mmf.CreateViewAccessor())
+    //        {
+    //            accessor.Read
+    //            int colorSize = Marshal.SizeOf(typeof(MyColor));
+    //            MyColor color;
+
+    //            // Make changes to the view.
+    //            for (long i = 0; i < length; i += colorSize)
+    //            {
+    //                accessor.Read(i, out color);
+    //                color.Brighten(10);
+    //                accessor.Write(i, ref color);
+    //            }
+    //        }
+    //    }
+    //}
 
     [Benchmark]
     public async Task PrintStatsBaseline()
