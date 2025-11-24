@@ -16,28 +16,44 @@ using System.Text;
 //var minCount = (int)Math.Max(fileLength / (int.MaxValue - Environment.SystemPageSize), 1);
 
 //using var fsOrig = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
-//using var fsSmall = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Create, FileAccess.ReadWrite);
+//using var fsSmall = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-100m.txt", FileMode.Create, FileAccess.ReadWrite);
 //using var sr = new StreamReader(fsOrig);
 //using var sw = new StreamWriter(fsSmall);
 
-//for (int i = 0; i < 50_000_000; i++)
+//for (int i = 0; i < 100_000_000; i++)
 //{
 //    sw.Write(sr.ReadLine());
 //    sw.Write("\n");
 //}
+//return;
 
 //return;
 //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
 
+//var lineCount = File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt").Count();
+//Console.WriteLine("Line count: {0}", lineCount);
+
+//string prevLine = "";
+//foreach (var l in File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt"))
+//{
+//    if (l == prevLine)
+//    {
+//        Debugger.Break();
+//    }
+
+//    prevLine = l;
+//}
+
+//return;
+
 //await RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
-await RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
+RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
 
-
-async Task RunAndMeasure(Func<Task> action, string name)
+void RunAndMeasure(Action action, string name)
 {
     var sw = Stopwatch.StartNew();
     //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
-    await action();
+    action();
     sw.Stop();
     Console.WriteLine("Running {0} finished in {1}", name, sw.Elapsed);
 }
@@ -47,10 +63,15 @@ async Task RunAndMeasure(Func<Task> action, string name)
 [InvocationCount(1)]
 public class OneBrcChallenge
 {
-    private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt";
+    //private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-5.txt";
+    //private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-996.txt";
+    //private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-1000.txt";
+    //private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt";
+    //private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-100m.txt";
+    private const string filePath = @"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt";
     private const byte Newline = (byte)'\n';
     private const byte SemiColon = (byte)';';
-    private int totalLinesProcessed = 0;
+    private long totalLinesProcessed = 0;
 
     private FileStream OpenFile() => new FileStream(filePath, FileMode.Open, FileAccess.Read);
 
@@ -84,6 +105,162 @@ public class OneBrcChallenge
 
         return batchPositions;
     }
+
+
+    private void ProcessBatchRandomAccess(long from, long to, ConcurrentDictionary<string, Stats> stats)
+    {
+        Console.WriteLine("Starting batch from {0} to {1}", from, to);
+
+        var statsDict = new Dictionary<string, Stats>();
+
+        var handle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
+        //Span<byte> buffer = stackalloc byte[4096];
+        Span<byte> buffer = stackalloc byte[256 << 10];
+        //Span<byte> buffer = new byte[4096];
+
+        var linesProcessed = new HashSet<string>();
+
+        while (from < to)
+        {
+            var bytesRead = RandomAccess.Read(handle, buffer, from);
+            var remainingBuffer = buffer;
+
+            while (from < to)
+            {
+                var lineEnd = remainingBuffer.IndexOf(Newline);
+
+                if (lineEnd == -1)
+                {
+                    break;
+                }
+
+                //Interlocked.Increment(ref totalLinesProcessed);
+
+                var line = remainingBuffer[..lineEnd];
+
+                //if (linesProcessed.Contains(Encoding.UTF8.GetString(line)))
+                //{
+                //    Debugger.Break();
+                //}
+
+                //linesProcessed.Add(Encoding.UTF8.GetString(line));
+
+                var semiColon = line.IndexOf(SemiColon);
+                var city = Encoding.UTF8.GetString(line[..semiColon]);
+
+                var num = line[semiColon + 1] == '-' ?
+                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
+                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
+
+                //stats.AddOrUpdate(city,
+                //    new Stats(num, num, 1, num),
+                //    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
+
+                if (statsDict.TryGetValue(city, out var s))
+                {
+                    statsDict[city] = new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num);
+                }
+                else
+                {
+                    statsDict.Add(city, new Stats(num, num, 1, num));
+                }
+
+                remainingBuffer = remainingBuffer[(lineEnd + 1)..];
+                from += lineEnd + 1;
+            }
+        }
+
+        Console.WriteLine("Finishing batch from {0} to {1}", from, to);
+    }
+
+    [Benchmark]
+    public void PrintStats()
+    {
+        //using var f = OpenFile();
+        //var s = FindNextNewlinePos(f);
+        //foreach ( var l in File.ReadLines(filePath).Take(10))
+        //{
+        //    Console.WriteLine(l);
+        //}
+        //return;
+        var sw = Stopwatch.StartNew();
+        var stats = new ConcurrentDictionary<string, Stats>();
+
+        var batchPositions = GetBatchPositions();
+
+        Console.WriteLine("Determining batch positions took: {0}", sw.Elapsed);
+
+        //var tasks = new List<Task>();
+        var threads = new Thread[batchPositions.Length - 1];
+
+        for (int i = 0; i < batchPositions.Length - 1; i++)
+        {
+            long from = batchPositions[i];
+            long to = batchPositions[i + 1];
+
+            //ProcessBatchRandomAccess(from, to, stats);
+
+            threads[i] = new Thread(() =>
+            {
+                //ProcessBatchPipeline(from, to, stats).Wait();
+                ProcessBatchRandomAccess(from, to, stats);
+            });
+            threads[i].Start();
+        }
+
+        //await Task.WhenAll(tasks);
+        foreach (var t in threads)
+        {
+            if (t != null) t.Join();
+        }
+
+        Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
+
+        Console.Write("{");
+        var first = true;
+
+        foreach (var kvp in stats.OrderBy(kvp => kvp.Key))
+        {
+            if (!first)
+            {
+                Console.Write(", ");
+            }
+
+            first = false;
+
+            //Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
+            Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value.Min / 10.0, 1), Math.Round((double)kvp.Value.Sum / 10 / kvp.Value.Count, 1), Math.Round(kvp.Value.Max / 10.0, 1));
+            //Console.Write("{0}={1}/{2}/{3}", Encoding.UTF8.GetString(kvp.Key), Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
+        }
+
+        Console.WriteLine("}");
+        Console.WriteLine("Total lines processed: {0}", totalLinesProcessed);
+        sw.Stop();
+    }
+
+    //public async Task PrintStatsMM()
+    //{
+    //    using (var mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, "measurements"))
+    //    {
+    //        // Create a random access view, from the 256th megabyte (the offset)
+    //        // to the 768th megabyte (the offset plus length).
+    //        //using (var accessor = mmf.CreateViewAccessor(offset, length))
+    //        using (var accessor = mmf.CreateViewAccessor())
+    //        {
+    //            accessor.Read
+    //            int colorSize = Marshal.SizeOf(typeof(MyColor));
+    //            MyColor color;
+
+    //            // Make changes to the view.
+    //            for (long i = 0; i < length; i += colorSize)
+    //            {
+    //                accessor.Read(i, out color);
+    //                color.Brighten(10);
+    //                accessor.Write(i, ref color);
+    //            }
+    //        }
+    //    }
+    //}
 
     private async Task ProcessBatchPipeline(long from, long to, ConcurrentDictionary<string, Stats> stats)
     {
@@ -142,145 +319,6 @@ public class OneBrcChallenge
         //}
         Console.WriteLine("Finishing batch from {0} to {1}", from, to);
     }
-
-    private async Task ProcessBatchRandomAccess(long from, long to, ConcurrentDictionary<string, Stats> stats)
-    {
-        Console.WriteLine("Starting batch from {0} to {1}", from, to);
-
-        var handle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
-        Span<byte> buffer = new byte[4096];
-
-        while(from < to)
-        {
-            var bytesRead = RandomAccess.Read(handle, buffer, from);
-            var remainingBuffer = buffer;
-
-            while (true)
-            {
-                var lineEnd = remainingBuffer.IndexOf(Newline);
-
-                if (lineEnd == -1)
-                {
-                    break;
-                }
-
-                Interlocked.Increment(ref totalLinesProcessed);
-
-                var line = remainingBuffer[..lineEnd];
-
-                var semiColon = line.IndexOf(SemiColon);
-                var city = Encoding.UTF8.GetString(line[..semiColon]);
-
-                var num = line[semiColon + 1] == '-' ?
-                    int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
-                    int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
-
-                stats.AddOrUpdate(city,
-                    new Stats(num, num, 1, num),
-                    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
-
-                remainingBuffer = remainingBuffer[(lineEnd + 1)..];
-                from += lineEnd + 1;
-            }
-        }
-
-        Console.WriteLine("Finishing batch from {0} to {1}", from, to);
-    }
-
-    //public async Task PrintStatsRandom()
-    //{
-
-    //}
-
-    [Benchmark]
-    public async Task PrintStats()
-    {
-        //using var f = OpenFile();
-        //var s = FindNextNewlinePos(f);
-        //foreach ( var l in File.ReadLines(filePath).Take(10))
-        //{
-        //    Console.WriteLine(l);
-        //}
-        //return;
-        var sw = Stopwatch.StartNew();
-        var stats = new ConcurrentDictionary<string, Stats>();
-
-        var batchPositions = GetBatchPositions();
-
-        Console.WriteLine("Determining batch positions took: {0}", sw.Elapsed);
-
-        //var tasks = new List<Task>();
-        var threads = new Thread[batchPositions.Length - 1];
-
-        for (int i = 0; i < batchPositions.Length - 1; i++)
-        {
-            long from = batchPositions[i];
-            long to = batchPositions[i + 1];
-            //ProcessBatchRandomAccess(from, to, stats).Wait();
-
-            threads[i] = new Thread(() =>
-            {
-                //ProcessBatchPipeline(from, to, stats).Wait();
-                ProcessBatchRandomAccess(from, to, stats).Wait();
-            });
-            threads[i].Start();
-            //tasks.Add(Task.Run(() => ProcessBatch(from, to, stats)));
-            //await ProcessBatch(from, to, stats);
-        }
-
-        //await Task.WhenAll(tasks);
-        foreach (var t in threads)
-        {
-            threads[0].Join();
-        }
-
-        Console.WriteLine("Elapsed before printing: {0}", sw.Elapsed);
-
-        Console.Write("{");
-        var first = true;
-
-        foreach (var kvp in stats.OrderBy(kvp => kvp.Key))
-        {
-            if (!first)
-            {
-                Console.Write(", ");
-            }
-
-            first = false;
-
-            //Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
-            Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value.Min / 10.0, 1), Math.Round((double)kvp.Value.Sum / 10 / kvp.Value.Count, 1), Math.Round(kvp.Value.Max / 10.0, 1));
-            //Console.Write("{0}={1}/{2}/{3}", Encoding.UTF8.GetString(kvp.Key), Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
-        }
-
-        Console.WriteLine("}");
-        Console.WriteLine("Total lines processed: {0}", totalLinesProcessed);
-        sw.Stop();
-    }
-
-    //public async Task PrintStatsMM()
-    //{
-    //    using (var mmf = MemoryMappedFile.CreateFromFile(filePath, FileMode.Open, "measurements"))
-    //    {
-    //        // Create a random access view, from the 256th megabyte (the offset)
-    //        // to the 768th megabyte (the offset plus length).
-    //        //using (var accessor = mmf.CreateViewAccessor(offset, length))
-    //        using (var accessor = mmf.CreateViewAccessor())
-    //        {
-    //            accessor.Read
-    //            int colorSize = Marshal.SizeOf(typeof(MyColor));
-    //            MyColor color;
-
-    //            // Make changes to the view.
-    //            for (long i = 0; i < length; i += colorSize)
-    //            {
-    //                accessor.Read(i, out color);
-    //                color.Brighten(10);
-    //                accessor.Write(i, ref color);
-    //            }
-    //        }
-    //    }
-    //}
 
     [Benchmark]
     public async Task PrintStatsBaseline()
