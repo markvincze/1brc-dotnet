@@ -12,10 +12,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using OneBrc.Console;
 
-//var fileHandle = File.OpenHandle(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-small.txt", FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
-//var fileLength = RandomAccess.GetLength(fileHandle);
-//var minCount = (int)Math.Max(fileLength / (int.MaxValue - Environment.SystemPageSize), 1);
-
 //using var fsOrig = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt", FileMode.Open, FileAccess.Read);
 //using var fsSmall = new FileStream(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements-100m.txt", FileMode.Create, FileAccess.ReadWrite);
 //using var sr = new StreamReader(fsOrig);
@@ -28,32 +24,12 @@ using OneBrc.Console;
 //}
 //return;
 
-//return;
-//var summary = BenchmarkRunner.Run<OneBrcChallenge>();
-
-//var lineCount = File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt").Count();
-//Console.WriteLine("Line count: {0}", lineCount);
-
-//string prevLine = "";
-//foreach (var l in File.ReadLines(@"C:\Workspaces\GitHub\markvincze\1brc-dotnet\src\OneBrc.Console\measurements.txt"))
-//{
-//    if (l == prevLine)
-//    {
-//        Debugger.Break();
-//    }
-
-//    prevLine = l;
-//}
-
-//return;
-
 //await RunAndMeasure(() => new OneBrcChallenge().PrintStatsBaseline(), "BASELINE");
 RunAndMeasure(() => new OneBrcChallenge().PrintStats(), "IMPROVED");
 
 void RunAndMeasure(Action action, string name)
 {
     var sw = Stopwatch.StartNew();
-    //var summary = BenchmarkRunner.Run<OneBrcChallenge>();
     action();
     sw.Stop();
     Console.WriteLine("Running {0} finished in {1}", name, sw.Elapsed);
@@ -107,15 +83,12 @@ public class OneBrcChallenge
         return batchPositions;
     }
 
-
     private void ProcessBatchRandomAccess(long from, long to, Dictionary<string, Stats> stats)
     {
         Console.WriteLine("Starting batch from {0} to {1}", from, to);
 
         var handle = File.OpenHandle(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
-        //Span<byte> buffer = stackalloc byte[4096];
         Span<byte> buffer = stackalloc byte[256 << 10];
-        //Span<byte> buffer = new byte[4096];
 
         var linesProcessed = new HashSet<string>();
 
@@ -137,23 +110,12 @@ public class OneBrcChallenge
 
                 var line = remainingBuffer[..lineEnd];
 
-                //if (linesProcessed.Contains(Encoding.UTF8.GetString(line)))
-                //{
-                //    Debugger.Break();
-                //}
-
-                //linesProcessed.Add(Encoding.UTF8.GetString(line));
-
                 var semiColon = line.IndexOf(SemiColon);
                 var city = Encoding.UTF8.GetString(line[..semiColon]);
 
                 var num = line[semiColon + 1] == '-' ?
                     int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
                     int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
-
-                //stats.AddOrUpdate(city,
-                //    new Stats(num, num, 1, num),
-                //    (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
 
                 if (stats.TryGetValue(city, out var s))
                 {
@@ -175,21 +137,12 @@ public class OneBrcChallenge
     [Benchmark]
     public void PrintStats()
     {
-        //using var f = OpenFile();
-        //var s = FindNextNewlinePos(f);
-        //foreach ( var l in File.ReadLines(filePath).Take(10))
-        //{
-        //    Console.WriteLine(l);
-        //}
-        //return;
         var sw = Stopwatch.StartNew();
-        //var stats = new ConcurrentDictionary<string, Stats>();
 
         var batchPositions = GetBatchPositions();
 
         Console.WriteLine("Determining batch positions took: {0}", sw.Elapsed);
 
-        //var tasks = new List<Task>();
         var threads = new Thread[batchPositions.Length - 1];
         var dicts = Array.Create(batchPositions.Length - 1, _ => new Dictionary<string, Stats>());
 
@@ -199,7 +152,6 @@ public class OneBrcChallenge
             long to = batchPositions[i + 1];
             var dict = dicts[i];
 
-            //ProcessBatchRandomAccess(from, to, stats);
 
             threads[i] = new Thread(() =>
             {
@@ -209,7 +161,6 @@ public class OneBrcChallenge
             threads[i].Start();
         }
 
-        //await Task.WhenAll(tasks);
         foreach (var t in threads)
         {
             if (t != null) t.Join();
@@ -248,9 +199,7 @@ public class OneBrcChallenge
 
             first = false;
 
-            //Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
             Console.Write("{0}={1}/{2}/{3}", kvp.Key, Math.Round(kvp.Value.Min / 10.0, 1), Math.Round((double)kvp.Value.Sum / 10 / kvp.Value.Count, 1), Math.Round(kvp.Value.Max / 10.0, 1));
-            //Console.Write("{0}={1}/{2}/{3}", Encoding.UTF8.GetString(kvp.Key), Math.Round(kvp.Value[0] / 10.0, 1), Math.Round((double)kvp.Value[3] / 10 / kvp.Value[2], 1), Math.Round(kvp.Value[1] / 10.0, 1));
         }
 
         Console.WriteLine("}");
@@ -319,24 +268,6 @@ public class OneBrcChallenge
             readResult = await pr.ReadAsync();
         }
 
-        //while (fs.Position < to)
-        //while (bytesRead < to)
-        //{
-        //    var line = sr.ReadLine();
-        //    bytesRead += (line.Length + 2);
-        //    Interlocked.Increment(ref totalLinesProcessed);
-
-        //    var semiColon = line.IndexOf(';');
-        //    var city = line[..semiColon];
-
-        //    var num = line[semiColon + 1] == '-' ?
-        //        int.Parse(line[(semiColon + 2)..^2]) * -10 - (line[^1] - 48) :
-        //        int.Parse(line[(semiColon + 1)..^2]) * 10 + (line[^1] - 48);
-
-        //    stats.AddOrUpdate(city,
-        //        new Stats(num, num, 1, num),
-        //        (c, s) => new Stats(Math.Min(s.Min, num), Math.Max(s.Max, num), s.Count + 1, s.Sum + num));
-        //}
         Console.WriteLine("Finishing batch from {0} to {1}", from, to);
     }
 
@@ -344,9 +275,6 @@ public class OneBrcChallenge
     public async Task PrintStatsBaseline()
     {
         var stats = new Dictionary<string, double[]>();
-
-        //using var fs = OpenFile();
-        //using 
 
         foreach (var l in File.ReadLines(filePath))
         {
@@ -391,3 +319,4 @@ public class OneBrcChallenge
 
 public readonly record struct Stats(int Min, int Max, int Count, int Sum)
 { }
+
